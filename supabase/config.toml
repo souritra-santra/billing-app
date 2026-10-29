@@ -1,0 +1,4 @@
+project_id = "billingapp"
+
+[functions.ai-extract]
+verify_jwt = true
