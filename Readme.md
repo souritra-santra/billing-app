@@ -15,7 +15,7 @@ This application is a **local-first mobile app** designed for cloth shop owners 
 * 📊 Sales tracking
 
 👉 The app **stores all data locally (offline)** using SQLite.
-👉 Cloud sync and multi-device support are optional: when Supabase is configured, a replicated catalogue is synced in the background while SQLite remains the source of truth.
+👉 Cloud sync and multi-device support are optional: when Supabase is configured, the catalogue, stock movements, customers and bills are replicated in the background while SQLite remains the source of truth.
 
 ---
 
@@ -426,8 +426,8 @@ newQty = currentQty - soldQty;
 
 # 🔄 14. Future Enhancements
 
-* ☁️ Sync inventory/orders/customers (catalogue sync is already implemented)
-* 📱 Append-only stock movement sync with conflict resolution
+* ☁️ Cloud sync for catalogue, inventory, customers and bills
+* 📱 Append-only stock movement sync with per-device deltas
 * 🖨️ Thermal printer integration
 * 📤 WhatsApp bill sharing
 * 📊 Advanced analytics
@@ -454,6 +454,7 @@ This feature scans **purchase invoices** or an individual **garment label / pric
 * **Review before write** — drafts are editable in a dedicated screen. Product type is mandatory and must be selected from existing `product_types`.
 * **Duplicate detection** — a matching barcode or product name is flagged. Barcode matches can only add stock to the existing product; name matches can be linked or overridden.
 * **Inventory safety** — extraction never creates products or changes stock. Creating a product, receiving stock, or confirming all drafts are separate explicit actions.
+* **Size-wise stock entry** — the review screen uses the same size-group grid as Add Product. Each size can have its own quantity; confirming adds every size to inventory and prints one label per size/unit.
 * **Print labels after confirming** — each confirmed draft offers **Print Label** (or a label count for multi-piece receipts); the existing thermal/system label pipeline is reused, and "Confirm All" can print every confirmed label at once.
 * **Local history** — extraction sessions and drafts are stored in the existing SQLite database (`ai_import_sessions`, `ai_product_drafts`). Cloud sync is optional; without it, everything stays on the device.
 
@@ -465,6 +466,8 @@ app/ai-import-review.tsx          Editable draft review + confirmations
 src/ai/config.ts                  Proxy URL / timeout configuration
 src/ai/parse.ts                   Structured-output parsing and validation
 src/ai/drafts.ts                  Type matching, duplicate detection, validation
+src/ai/sizes.ts                   Size-wise draft quantities and validation
+src/components/SizeQuantityEditor.tsx  Shared Add Product / AI review size grid
 src/ai/errors.ts                  Typed AI / draft errors
 src/ai/__tests__/                 Unit tests
 src/services/imageService.ts      Resize / convert images to JPEG
@@ -542,9 +545,9 @@ The dashboard and Inventory header both link to **AI Import**.
 New tables are created automatically by `CREATE_TABLES_SQL` on startup:
 
 * `ai_import_sessions` — mode, status, supplier/invoice, image quality, warnings, raw response, error details.
-* `ai_product_drafts` — editable extracted fields, matched type, status (`pending`, `created`, `stock_added`, `discarded`), linked product id.
+* `ai_product_drafts` — editable extracted fields, size-wise quantities (`sizes_json`), matched type, status (`pending`, `created`, `stock_added`, `discarded`), linked product id.
 
-`products` gains nullable `brand` and `colour` columns for values captured during import. The existing in-place migration in `src/database/db.ts` adds them to older installations; existing rows and screens continue to work.
+`products` gains nullable `brand` and `colour` columns for values captured during import. The existing in-place migration in `src/database/db.ts` adds them to older installations; existing rows and screens continue to work. Older drafts are opened with their single size/quantity pre-filled in the new size grid.
 
 ### Error handling
 
@@ -578,6 +581,7 @@ The app remains **local-first**. SQLite is still the source of truth for every s
 
 ```
 supabase/migrations/20261029000000_cloud_sync.sql   Shops, RLS, catalogue replica, change log, RPCs
+supabase/migrations/20261029001000_sync_operational_tables.sql  Customers, bills, bill lines, stock movements
 supabase/functions/ai-extract/                     Gemini Edge Function (replaces the local proxy when signed in)
 supabase/functions/_shared/gemini.ts               Prompt + schema + Gemini client
 src/sync/client.ts                                 Supabase client (auth session in AsyncStorage)
@@ -587,12 +591,15 @@ src/database/syncSchema.ts                         Local outbox, sync state, SQL
 app/cloud-sync.tsx                                 Sign in, create/join shop, sync, invite code
 ```
 
-### Current sync scope (milestone 1)
+### Sync scope
 
-* Synced: `product_types` and `products` (create, edit, soft delete).
-* Local-only for now: inventory quantities, customers, orders/order items, stock movements and AI drafts. The server tables and RPC scaffolding exist for the next milestone, but the app does not push them yet.
-* Physical-presence billing means no online stock reservation is required. The next milestone will sync stock via append-only `stock_movements` rather than absolute quantities.
-* The first linked shop reuses the existing `billingapp.db`, preserving an existing catalogue. Additional shops get isolated local database files (`billingapp-<shop-id>.db`).
+* Synced: `product_types`, `products`, `customers`, `orders`, `order_items` and `stock_movements` (create, edit, soft delete where applicable).
+* Stock is replicated as **append-only deltas**, not absolute quantities. Each stock receipt, sale and manual adjustment records one movement, so two devices cannot silently overwrite each other's counts.
+* Inventory remains a fast local cache. On pull, the app applies each new movement to the cached quantity and recalculates customer totals from the local bill ledger.
+* A one-time baseline movement captures stock that existed before operational sync. It uses a deterministic id and `1970-01-01` timestamp, so backing up or joining cannot double-count post-update movements.
+* Physical-presence billing means no online stock reservation is required. Cashiers still bill only physically present stock.
+* The first linked shop reuses the existing `billingapp.db`, preserving existing data. Additional shops get isolated local database files (`billingapp-<shop-id>.db`).
+* Joining a shop in **pull** mode leaves pre-existing local bills/stock on the device and marks the one-time upload as complete, so they are not pushed into the joined shop. **Upload** mode snapshots the local catalogue, customers, bills and current stock baseline.
 * The app attempts a best-effort sync after startup and whenever it returns to the foreground. **Sync Now** forces an immediate sync; failed background attempts are shown on the Cloud Sync screen.
 
 ### Deploy
@@ -606,7 +613,7 @@ app/cloud-sync.tsx                                 Sign in, create/join shop, sy
    npx supabase db push
    ```
 
-   Alternatively paste `supabase/migrations/20261029000000_cloud_sync.sql` into the dashboard SQL editor.
+   Alternatively paste both migration files into the dashboard SQL editor, in filename order (`20261029000000_cloud_sync.sql`, then `20261029001000_sync_operational_tables.sql`).
 
 3. Set Edge Function secrets (the **Gemini key never goes into the mobile bundle**):
 
@@ -654,6 +661,8 @@ Supabase free currently includes a 500 MB database, 1 GB storage, 5 GB egress, 5
 * **`not a shop member`** — the user has not created/joined the active shop, or `shop_members` RLS has no row for that account.
 * **AI falls back to the local proxy** — cloud AI is used only when Supabase is configured, the user is signed in and a shop is active. Otherwise the existing `EXPO_PUBLIC_AI_PROXY_URL` path is used.
 * **Two products share a barcode** — the server keeps the first barcode and stores the later product without a barcode. The next pull clears the duplicate locally, so sync continues. Re-assign a barcode on one product if needed.
+* **Two customers share a phone number** — this is allowed; the server uses a non-unique lookup index, so offline customer creation never blocks a push.
+* **Stock looks wrong after joining** — pull mode does not upload local bills/stock. Use upload mode for a device whose existing stock should become the shop's starting stock.
 
 ---
 

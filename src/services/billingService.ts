@@ -49,9 +49,13 @@ export async function checkout(
         items
     );
 
-    // Reduce stock for each item
+    // Reduce stock for each item and keep the movement linked to this bill so
+    // other devices can apply the same sale without double-counting it.
     for (const item of cart) {
-        await reduceStock(item.product.id, item.size, item.quantity);
+        await reduceStock(item.product.id, item.size, item.quantity, {
+            reason: 'sale',
+            orderId,
+        });
     }
 
     // Update customer total purchase

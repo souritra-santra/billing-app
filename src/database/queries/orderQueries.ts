@@ -37,6 +37,7 @@ export async function getRecentOrders(limit: number = 10): Promise<Order[]> {
         `SELECT o.*, c.name as customer_name 
      FROM orders o 
      LEFT JOIN customers c ON o.customer_id = c.id 
+     WHERE o.deleted_at IS NULL
      ORDER BY o.date DESC 
      LIMIT ?`,
         [limit]
@@ -57,7 +58,9 @@ export async function getOrderItems(orderId: string): Promise<OrderItem[]> {
 export async function getOrdersByCustomer(customerId: string): Promise<Order[]> {
     const db = await getDatabase();
     return db.getAllAsync<Order>(
-        `SELECT * FROM orders WHERE customer_id = ? ORDER BY date DESC`,
+        `SELECT * FROM orders
+         WHERE customer_id = ? AND deleted_at IS NULL
+         ORDER BY date DESC`,
         [customerId]
     );
 }
@@ -68,10 +71,11 @@ export async function getDailySales(date: string): Promise<SalesSummary> {
         `SELECT 
        COALESCE(SUM(final_amount), 0) as total_sales, 
        COUNT(*) as total_orders,
-       COALESCE((SELECT SUM(quantity) FROM order_items WHERE order_id IN 
-         (SELECT id FROM orders WHERE date(date) = date(?))), 0) as total_items
+       COALESCE((SELECT SUM(oi.quantity) FROM order_items oi
+         JOIN orders o2 ON oi.order_id = o2.id
+         WHERE o2.deleted_at IS NULL AND date(o2.date) = date(?)), 0) as total_items
      FROM orders 
-     WHERE date(date) = date(?)`,
+     WHERE deleted_at IS NULL AND date(date) = date(?)`,
         [date, date]
     );
     return result ?? { total_sales: 0, total_orders: 0, total_items: 0 };
@@ -84,10 +88,11 @@ export async function getMonthlySales(year: number, month: number): Promise<Sale
         `SELECT 
        COALESCE(SUM(final_amount), 0) as total_sales, 
        COUNT(*) as total_orders,
-       COALESCE((SELECT SUM(quantity) FROM order_items WHERE order_id IN 
-         (SELECT id FROM orders WHERE strftime('%Y-%m', date) = ?)), 0) as total_items
+       COALESCE((SELECT SUM(oi.quantity) FROM order_items oi
+         JOIN orders o2 ON oi.order_id = o2.id
+         WHERE o2.deleted_at IS NULL AND strftime('%Y-%m', o2.date) = ?), 0) as total_items
      FROM orders 
-     WHERE strftime('%Y-%m', date) = ?`,
+     WHERE deleted_at IS NULL AND strftime('%Y-%m', date) = ?`,
         [`${year}-${monthStr}`, `${year}-${monthStr}`]
     );
     return result ?? { total_sales: 0, total_orders: 0, total_items: 0 };
@@ -103,6 +108,8 @@ export async function getTopSellingProducts(limit: number = 10): Promise<TopProd
        SUM(oi.price * oi.quantity) as total_revenue
      FROM order_items oi
      JOIN products p ON oi.product_id = p.id
+     JOIN orders o ON oi.order_id = o.id
+     WHERE o.deleted_at IS NULL
      GROUP BY oi.product_id
      ORDER BY total_sold DESC
      LIMIT ?`,

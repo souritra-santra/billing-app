@@ -178,4 +178,255 @@ export const SYNC_SCHEMA_SQL = `
       datetime('now')
     );
   END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_customers_sync_insert
+  AFTER INSERT ON customers
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'customers',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'name', NEW.name,
+        'phone', NEW.phone,
+        'total_purchase', NEW.total_purchase,
+        'due_amount', NEW.due_amount,
+        'created_at', NEW.created_at,
+        'updated_at', COALESCE(NEW.updated_at, datetime('now')),
+        'deleted_at', NEW.deleted_at,
+        'version', COALESCE(NEW.version, 1)
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_customers_sync_update
+  AFTER UPDATE ON customers
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'customers',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'name', NEW.name,
+        'phone', NEW.phone,
+        'total_purchase', NEW.total_purchase,
+        'due_amount', NEW.due_amount,
+        'created_at', NEW.created_at,
+        'updated_at', COALESCE(NEW.updated_at, datetime('now')),
+        'deleted_at', NEW.deleted_at,
+        'version', COALESCE(NEW.version, 1)
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_customers_sync_delete
+  AFTER DELETE ON customers
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'customers',
+      OLD.id,
+      'delete',
+      json_object('id', OLD.id, 'deleted_at', datetime('now')),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_orders_sync_insert
+  AFTER INSERT ON orders
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'orders',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'date', NEW.date,
+        'customer_id', NEW.customer_id,
+        'total_amount', NEW.total_amount,
+        'discount', NEW.discount,
+        'tax', NEW.tax,
+        'final_amount', NEW.final_amount,
+        'payment_mode', NEW.payment_mode,
+        'created_at', COALESCE(NEW.created_at, NEW.date, datetime('now')),
+        'updated_at', COALESCE(NEW.updated_at, NEW.date, datetime('now')),
+        'deleted_at', NEW.deleted_at,
+        'version', COALESCE(NEW.version, 1)
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_orders_sync_update
+  AFTER UPDATE ON orders
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'orders',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'date', NEW.date,
+        'customer_id', NEW.customer_id,
+        'total_amount', NEW.total_amount,
+        'discount', NEW.discount,
+        'tax', NEW.tax,
+        'final_amount', NEW.final_amount,
+        'payment_mode', NEW.payment_mode,
+        'created_at', COALESCE(NEW.created_at, NEW.date, datetime('now')),
+        'updated_at', COALESCE(NEW.updated_at, NEW.date, datetime('now')),
+        'deleted_at', NEW.deleted_at,
+        'version', COALESCE(NEW.version, 1)
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_orders_sync_delete
+  AFTER DELETE ON orders
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'orders',
+      OLD.id,
+      'delete',
+      json_object('id', OLD.id, 'deleted_at', datetime('now')),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_order_items_sync_insert
+  AFTER INSERT ON order_items
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'order_items',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'order_id', NEW.order_id,
+        'product_id', NEW.product_id,
+        'size', NEW.size,
+        'quantity', NEW.quantity,
+        'price', NEW.price,
+        'created_at', COALESCE(NEW.created_at, datetime('now'))
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_order_items_sync_update
+  AFTER UPDATE ON order_items
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'order_items',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'order_id', NEW.order_id,
+        'product_id', NEW.product_id,
+        'size', NEW.size,
+        'quantity', NEW.quantity,
+        'price', NEW.price,
+        'created_at', COALESCE(NEW.created_at, datetime('now'))
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_order_items_sync_delete
+  AFTER DELETE ON order_items
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'order_items',
+      OLD.id,
+      'delete',
+      json_object('id', OLD.id),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS trg_stock_movements_sync_insert
+  AFTER INSERT ON stock_movements
+  WHEN COALESCE((SELECT value FROM sync_state WHERE key = 'applying_remote'), '0') <> '1'
+  BEGIN
+    INSERT OR REPLACE INTO sync_outbox
+      (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+    VALUES (
+      lower(hex(randomblob(16))),
+      'stock_movements',
+      NEW.id,
+      'upsert',
+      json_object(
+        'id', NEW.id,
+        'product_id', NEW.product_id,
+        'size', NEW.size,
+        'delta', NEW.delta,
+        'reason', NEW.reason,
+        'order_id', NEW.order_id,
+        'device_id', NEW.device_id,
+        'created_at', NEW.created_at
+      ),
+      0,
+      NULL,
+      datetime('now')
+    );
+  END;
 `;

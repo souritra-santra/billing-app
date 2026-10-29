@@ -17,11 +17,17 @@ import {
 import { increaseStock } from '../database/queries/inventoryQueries';
 import {
   AiProductDraft,
+  AiDraftSize,
   AiDraftStatus,
   AiExtractionResult,
   AiImportMode,
 } from '../types/models';
 import { matchProductType, validateDraftForCreate, validateDraftForStock } from '../ai/drafts';
+import {
+  effectiveDraftSizes,
+  primarySize,
+  totalSizeQuantity,
+} from '../ai/sizes';
 import { AiDraftError, AiImportError, isAiImportError } from '../ai/errors';
 import { AiResultValidationError, parseAiExtraction } from '../ai/parse';
 import { generateBarcode } from '../utils/helpers';
@@ -41,6 +47,8 @@ export interface ConfirmDraftOptions {
   receiveStock: boolean;
   /** Link the draft to an existing product instead of creating one. */
   existingProductId?: string | null;
+  /** Size-wise quantities to add. Falls back to the draft's size + quantity. */
+  stockEntries?: AiDraftSize[] | null;
 }
 
 export interface ConfirmDraftResult {
@@ -63,6 +71,10 @@ function toDraftInput(
     mrp: product.mrp,
     quantity: product.quantity,
     size: product.size,
+    sizes:
+      product.size && product.quantity && product.quantity > 0
+        ? [{ size: product.size, quantity: Math.floor(product.quantity) }]
+        : [],
     colour: product.colour,
     barcode: product.barcode,
     supplier_name: result.supplier_name,
@@ -81,6 +93,7 @@ function buildDraftFields(draft: AiProductDraft): AiDraftInput {
     mrp: draft.mrp,
     quantity: draft.quantity,
     size: draft.size,
+    sizes: draft.sizes ?? [],
     colour: draft.colour,
     barcode: draft.barcode,
     supplier_name: draft.supplier_name,
@@ -161,20 +174,27 @@ export async function confirmAiDraft(
 ): Promise<ConfirmDraftResult> {
   const db = await getDatabase();
   const existingProductId = options.existingProductId?.trim() || null;
+  const stockEntries = effectiveDraftSizes(draft, options.stockEntries);
+  const draftWithSizes: AiProductDraft = {
+    ...draft,
+    sizes: stockEntries,
+    size: primarySize(stockEntries),
+    quantity: stockEntries.length > 0 ? totalSizeQuantity(stockEntries) : null,
+  };
+  const draftFields = buildDraftFields(draftWithSizes);
 
   if (existingProductId) {
     const existing = await getProductById(existingProductId);
     if (!existing) throw new AiDraftError('not_found');
 
-    const issues = validateDraftForStock(draft);
+    const issues = validateDraftForStock(draftWithSizes);
     if (issues.length > 0) throw new AiDraftError(issues[0]);
 
-    const size = draft.size!.trim();
-    const quantity = Math.floor(draft.quantity!);
-
     await db.withTransactionAsync(async () => {
-      await updateAiDraft(draft.id, buildDraftFields(draft));
-      await increaseStock(existingProductId, size, quantity);
+      await updateAiDraft(draft.id, draftFields);
+      for (const entry of stockEntries) {
+        await increaseStock(existingProductId, entry.size, entry.quantity);
+      }
       await setAiDraftStatus(draft.id, 'stock_added', existingProductId);
     });
 
@@ -193,7 +213,7 @@ export async function confirmAiDraft(
   }
 
   const issues = validateDraftForCreate(
-    { ...draft, type_id: typeId },
+    { ...draftWithSizes, type_id: typeId },
     options.receiveStock
   );
   if (issues.length > 0) throw new AiDraftError(issues[0]);
@@ -207,13 +227,12 @@ export async function confirmAiDraft(
   const name = draft.name!.trim();
   const mrp = draft.mrp!;
   const cost = draft.cost_price ?? 0;
-  const quantity = draft.quantity ? Math.floor(draft.quantity) : 0;
-  const size = draft.size?.trim() || '';
+  const receivesStock = options.receiveStock && stockEntries.length > 0;
   let productId = '';
 
   try {
     await db.withTransactionAsync(async () => {
-      await updateAiDraft(draft.id, { ...buildDraftFields(draft), type_id: typeId });
+      await updateAiDraft(draft.id, { ...draftFields, type_id: typeId });
       productId = await addProduct(
         name,
         typeId,
@@ -224,13 +243,15 @@ export async function confirmAiDraft(
         draft.colour
       );
 
-      if (options.receiveStock && quantity > 0) {
-        await increaseStock(productId, size, quantity);
+      if (receivesStock) {
+        for (const entry of stockEntries) {
+          await increaseStock(productId, entry.size, entry.quantity);
+        }
       }
 
       await setAiDraftStatus(
         draft.id,
-        options.receiveStock && quantity > 0 ? 'stock_added' : 'created',
+        receivesStock ? 'stock_added' : 'created',
         productId
       );
     });
@@ -244,11 +265,10 @@ export async function confirmAiDraft(
     );
   }
 
-  const stockAdded = options.receiveStock && quantity > 0;
   return {
-    status: stockAdded ? 'stock_added' : 'created',
+    status: receivesStock ? 'stock_added' : 'created',
     productId,
-    stockAdded,
+    stockAdded: receivesStock,
     created: true,
   };
 }

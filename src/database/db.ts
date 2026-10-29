@@ -119,6 +119,70 @@ async function runMigrations(db: SQLite.SQLiteDatabase): Promise<void> {
     if (!freshProductColumns.some((column) => column.name === 'version')) {
         await db.execAsync('ALTER TABLE products ADD COLUMN version INTEGER NOT NULL DEFAULT 1;');
     }
+
+    // v4 -> v5: size-wise AI draft quantities.
+    const aiDraftColumns = await db.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(ai_product_drafts)'
+    );
+    if (!aiDraftColumns.some((column) => column.name === 'sizes_json')) {
+        await db.execAsync(
+            "ALTER TABLE ai_product_drafts ADD COLUMN sizes_json TEXT NOT NULL DEFAULT '[]';"
+        );
+    }
+
+    // v5 -> v6: operational tables (customers, bills) joined cloud sync.
+    const customerColumns = await db.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(customers)'
+    );
+    if (!customerColumns.some((column) => column.name === 'updated_at')) {
+        await db.execAsync('ALTER TABLE customers ADD COLUMN updated_at TEXT;');
+        await db.execAsync(
+            "UPDATE customers SET updated_at = COALESCE(created_at, datetime('now')) WHERE updated_at IS NULL;"
+        );
+    }
+    if (!customerColumns.some((column) => column.name === 'deleted_at')) {
+        await db.execAsync('ALTER TABLE customers ADD COLUMN deleted_at TEXT;');
+    }
+    if (!customerColumns.some((column) => column.name === 'version')) {
+        await db.execAsync('ALTER TABLE customers ADD COLUMN version INTEGER NOT NULL DEFAULT 1;');
+    }
+
+    const orderColumns = await db.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(orders)'
+    );
+    if (!orderColumns.some((column) => column.name === 'created_at')) {
+        await db.execAsync('ALTER TABLE orders ADD COLUMN created_at TEXT;');
+        await db.execAsync(
+            "UPDATE orders SET created_at = COALESCE(created_at, date, datetime('now')) WHERE created_at IS NULL;"
+        );
+    }
+    if (!orderColumns.some((column) => column.name === 'updated_at')) {
+        await db.execAsync('ALTER TABLE orders ADD COLUMN updated_at TEXT;');
+        await db.execAsync(
+            "UPDATE orders SET updated_at = COALESCE(created_at, date, datetime('now')) WHERE updated_at IS NULL;"
+        );
+    }
+    if (!orderColumns.some((column) => column.name === 'deleted_at')) {
+        await db.execAsync('ALTER TABLE orders ADD COLUMN deleted_at TEXT;');
+    }
+    if (!orderColumns.some((column) => column.name === 'version')) {
+        await db.execAsync('ALTER TABLE orders ADD COLUMN version INTEGER NOT NULL DEFAULT 1;');
+    }
+
+    const orderItemColumns = await db.getAllAsync<{ name: string }>(
+        'PRAGMA table_info(order_items)'
+    );
+    if (!orderItemColumns.some((column) => column.name === 'created_at')) {
+        await db.execAsync('ALTER TABLE order_items ADD COLUMN created_at TEXT;');
+        await db.execAsync(`
+            UPDATE order_items
+            SET created_at = COALESCE(
+                (SELECT COALESCE(o.created_at, o.date) FROM orders o WHERE o.id = order_items.order_id),
+                datetime('now')
+            )
+            WHERE created_at IS NULL;
+        `);
+    }
 }
 
 export function generateId(): string {

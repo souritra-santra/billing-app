@@ -1,4 +1,5 @@
 import {
+  AiDraftSize,
   AiDuplicateMatch,
   AiProductDraft,
   Product,
@@ -6,6 +7,25 @@ import {
 } from '../types/models';
 
 export type DraftValidationIssue = 'name' | 'type' | 'price' | 'quantity' | 'size';
+
+function draftSizeIssues(
+  sizes: AiDraftSize[] | null | undefined,
+  quantity: number | null | undefined,
+  size: string | null | undefined
+): DraftValidationIssue[] {
+  if (Array.isArray(sizes) && sizes.length > 0) {
+    const issues: DraftValidationIssue[] = [];
+    if (sizes.some((entry) => !entry.size?.trim())) issues.push('size');
+    if (sizes.some((entry) => !entry.quantity || entry.quantity <= 0)) {
+      issues.push('quantity');
+    }
+    return issues;
+  }
+  const issues: DraftValidationIssue[] = [];
+  if (!quantity || quantity <= 0) issues.push('quantity');
+  if (!size?.trim()) issues.push('size');
+  return issues;
+}
 
 export function normalizeText(value: string | null | undefined): string {
   return (value ?? '')
@@ -107,6 +127,7 @@ export function validateDraftForCreate(
   draft: Pick<AiProductDraft, 'name' | 'type_id' | 'mrp'> & {
     quantity?: number | null;
     size?: string | null;
+    sizes?: AiDraftSize[] | null;
   },
   receiveStock: boolean
 ): DraftValidationIssue[] {
@@ -117,17 +138,15 @@ export function validateDraftForCreate(
     issues.push('price');
   }
   if (receiveStock) {
-    if (!draft.quantity || draft.quantity <= 0) issues.push('quantity');
-    if (!draft.size?.trim()) issues.push('size');
+    issues.push(...draftSizeIssues(draft.sizes, draft.quantity, draft.size));
   }
   return issues;
 }
 
 export function validateDraftForStock(
-  draft: Pick<AiProductDraft, 'quantity' | 'size'>
+  draft: Pick<AiProductDraft, 'quantity' | 'size'> & {
+    sizes?: AiDraftSize[] | null;
+  }
 ): DraftValidationIssue[] {
-  const issues: DraftValidationIssue[] = [];
-  if (!draft.quantity || draft.quantity <= 0) issues.push('quantity');
-  if (!draft.size?.trim()) issues.push('size');
-  return issues;
+  return draftSizeIssues(draft.sizes, draft.quantity, draft.size);
 }

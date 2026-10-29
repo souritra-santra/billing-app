@@ -15,24 +15,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors, Spacing, FontSize, FontWeight, BorderRadius } from '../src/constants/theme';
 import AppInput from '../src/components/AppInput';
 import AppButton from '../src/components/AppButton';
-import AppCard from '../src/components/AppCard';
+import SizeQuantityEditor from '../src/components/SizeQuantityEditor';
 import { getProductTypes, addProduct, updateProduct, getProductById } from '../src/database/queries/productQueries';
 import { setInventory, getInventoryForProduct } from '../src/database/queries/inventoryQueries';
 import { generateBarcode, formatCurrency } from '../src/utils/helpers';
 import { useLanguage } from '../src/i18n';
-import { ProductType, InventoryItem, LabelProduct } from '../src/types/models';
-
-const SIZE_GROUPS = [
-    { id: 'letter', labelKey: 'addProduct.groupLetter', sizes: ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL', 'Free'] },
-    { id: 'shirt', labelKey: 'addProduct.groupShirt', sizes: ['34', '36', '38', '40', '42', '44', '46'] },
-    { id: 'waist', labelKey: 'addProduct.groupWaist', sizes: ['28', '30', '32', '34', '36', '38', '40', '42'] },
-    { id: 'kids', labelKey: 'addProduct.groupKids', sizes: ['2Y', '3Y', '4Y', '5Y', '6Y', '7Y', '8Y', '10Y', '12Y', '14Y'] },
-    { id: 'shoe', labelKey: 'addProduct.groupShoe', sizes: ['5', '6', '7', '8', '9', '10', '11'] },
-];
-
-// Aligns action buttons (add size, remove size) with the AppInput field
-// that sits right of the label in `row` layouts.
-const LABEL_OFFSET = 22;
+import { ProductType, LabelProduct } from '../src/types/models';
 
 export default function AddProductScreen() {
     const router = useRouter();
@@ -49,8 +37,6 @@ export default function AddProductScreen() {
 
     // Inventory Sizes
     const [sizes, setSizes] = useState<{ size: string; qty: string }[]>([]);
-    const [activeSizeGroup, setActiveSizeGroup] = useState('letter');
-    const [customSize, setCustomSize] = useState('');
     const [saving, setSaving] = useState(false);
     // Set after a new product is first created; re-saving then updates it
     // instead of inserting a duplicate (same barcode -> UNIQUE constraint).
@@ -60,6 +46,7 @@ export default function AddProductScreen() {
     // the OS auto-scroll can be unreliable while the keyboard overlays the app.
     const scrollRef = useRef<ScrollView>(null);
     const fieldRowY = useRef<Record<string, number>>({});
+    const sizeEditorY = useRef(0);
 
     const scrollToField = (key: string) => {
         const y = fieldRowY.current[key];
@@ -67,10 +54,6 @@ export default function AddProductScreen() {
         requestAnimationFrame(() => {
             scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: true });
         });
-    };
-
-    const rememberFieldY = (key: string) => (e: { nativeEvent: { layout: { y: number } } }) => {
-        fieldRowY.current[key] = e.nativeEvent.layout.y;
     };
 
     useEffect(() => {
@@ -101,31 +84,6 @@ export default function AddProductScreen() {
                 setSizes(inv.map(i => ({ size: i.size, qty: i.quantity.toString() })));
             }
         }
-    };
-
-    const handleAddSize = (sizeName: string) => {
-        if (!sizes.find(s => s.size === sizeName)) {
-            setSizes([...sizes, { size: sizeName, qty: '0' }]);
-        }
-    };
-
-    const handleUpdateSizeQty = (index: number, val: string) => {
-        const updated = [...sizes];
-        updated[index].qty = val;
-        setSizes(updated);
-    };
-
-    const handleRemoveSize = (index: number) => {
-        setSizes(sizes.filter((_, i) => i !== index));
-    };
-
-    const handleAddCustom = () => {
-        const sizeName = customSize.trim();
-        if (!sizeName) return Alert.alert(t('addProduct.customSize'), t('addProduct.customSizeError'));
-        if (!sizes.find(s => s.size === sizeName)) {
-            setSizes([...sizes, { size: sizeName, qty: '0' }]);
-        }
-        setCustomSize('');
     };
 
     const getProfitInfo = () => {
@@ -302,82 +260,20 @@ export default function AddProductScreen() {
 
                 <View style={styles.divider} />
 
-                <Text style={styles.sectionTitle}>{t('addProduct.inventorySizes')}</Text>
-                <Text style={styles.subtitle}>{t('addProduct.sizeHint')}</Text>
-
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.sizeGroupRow}>
-                    {SIZE_GROUPS.map(g => (
-                        <TouchableOpacity
-                            key={g.id}
-                            style={[styles.typeChip, activeSizeGroup === g.id && styles.typeChipActive]}
-                            onPress={() => setActiveSizeGroup(g.id)}
-                        >
-                            <Text style={[styles.typeText, activeSizeGroup === g.id && styles.typeTextActive]}>
-                                {t(g.labelKey)}
-                            </Text>
-                        </TouchableOpacity>
-                    ))}
-                </ScrollView>
-
-                <View style={styles.sizeOptions}>
-                    {(SIZE_GROUPS.find(g => g.id === activeSizeGroup)?.sizes ?? []).map(s => (
-                        <TouchableOpacity
-                            key={s}
-                            style={[
-                                styles.sizeBtn,
-                                sizes.find(sz => sz.size === s) && styles.sizeBtnSelected
-                            ]}
-                            onPress={() => handleAddSize(s)}
-                        >
-                            <Text style={[
-                                styles.sizeBtnText,
-                                sizes.find(sz => sz.size === s) && styles.sizeBtnTextSelected
-                            ]}>{s}</Text>
-                        </TouchableOpacity>
-                    ))}
-                    {customSize.trim() !== '' && !sizes.find(sz => sz.size === customSize.trim()) && (
-                        <TouchableOpacity style={[styles.sizeBtn, styles.sizeBtnCustom]} onPress={handleAddCustom}>
-                            <Text style={styles.sizeBtnTextCustom}>+ {customSize.trim()}</Text>
-                        </TouchableOpacity>
-                    )}
-                </View>
-
-                <View style={styles.row} onLayout={rememberFieldY('customSize')}>
-                    <AppInput
-                        label={t('addProduct.customSize')}
-                        value={customSize}
-                        onChangeText={setCustomSize}
-                        placeholder={t('addProduct.customPlaceholder')}
-                        style={{ flex: 1, marginBottom: 0 }}
-                        onFocus={() => scrollToField('customSize')}
+                <View
+                    onLayout={(event) => {
+                        sizeEditorY.current = event.nativeEvent.layout.y;
+                    }}
+                >
+                    <SizeQuantityEditor
+                        sizes={sizes}
+                        onChange={setSizes}
+                        onFieldFocus={scrollToField}
+                        onFieldLayout={(key, y) => {
+                            fieldRowY.current[key] = sizeEditorY.current + y;
+                        }}
                     />
-                    <TouchableOpacity style={styles.addCustomBtn} onPress={handleAddCustom}>
-                        <Ionicons name="add" size={24} color="#fff" />
-                    </TouchableOpacity>
                 </View>
-
-                {sizes.length > 0 && (
-                    <AppCard style={styles.sizesCard}>
-                        {sizes.map((s, idx) => (
-                            <View key={idx} style={styles.sizeInputRow} onLayout={rememberFieldY(`sizeQty_${idx}`)}>
-                                <View style={styles.sizeLabelWrap}>
-                                    <Text style={styles.sizeInputLabel}>{s.size}</Text>
-                                </View>
-                                <AppInput
-                                    label={t('addProduct.quantity')}
-                                    value={s.qty}
-                                    onChangeText={(val) => handleUpdateSizeQty(idx, val)}
-                                    keyboardType="numeric"
-                                    style={{ flex: 1, marginBottom: 0 }}
-                                    onFocus={() => scrollToField(`sizeQty_${idx}`)}
-                                />
-                                <TouchableOpacity style={styles.removeSizeBtn} onPress={() => handleRemoveSize(idx)}>
-                                    <Ionicons name="trash-outline" size={20} color={Colors.danger} />
-                                </TouchableOpacity>
-                            </View>
-                        ))}
-                    </AppCard>
-                )}
 
                 <AppButton
                     title={saving ? t('addProduct.saving') : t('addProduct.saveProduct')}
@@ -409,24 +305,8 @@ const styles = StyleSheet.create({
     regenBtn: { flexDirection: 'row', alignItems: 'center', gap: Spacing.xs, marginTop: Spacing.xs, marginBottom: Spacing.lg },
     regenText: { color: Colors.primary, fontSize: FontSize.sm, fontWeight: FontWeight.medium },
     divider: { height: 1, backgroundColor: Colors.border, marginVertical: Spacing.lg },
-    sectionTitle: { color: Colors.text, fontSize: FontSize.lg, fontWeight: FontWeight.semibold },
-    subtitle: { color: Colors.textMuted, fontSize: FontSize.sm, marginBottom: Spacing.md, marginTop: Spacing.xs },
-    sizeOptions: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.lg },
-    sizeGroupRow: { flexDirection: 'row', marginBottom: Spacing.md },
-    sizeBtn: { width: 44, height: 44, borderRadius: BorderRadius.md, backgroundColor: Colors.surfaceLight, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
-    sizeBtnSelected: { backgroundColor: Colors.primary },
-    sizeBtnCustom: { width: 'auto', paddingHorizontal: Spacing.md, backgroundColor: Colors.surfaceHighlight, borderColor: Colors.primary },
-    sizeBtnText: { color: Colors.textMuted, fontSize: FontSize.sm, fontWeight: FontWeight.bold },
-    sizeBtnTextSelected: { color: '#fff' },
-    sizeBtnTextCustom: { color: Colors.primary, fontSize: FontSize.sm, fontWeight: FontWeight.bold },
-    addCustomBtn: { width: 48, height: 48, borderRadius: BorderRadius.md, backgroundColor: Colors.primary, alignItems: 'center', justifyContent: 'center', marginTop: LABEL_OFFSET, marginLeft: Spacing.sm },
     profitHint: { fontSize: FontSize.sm, fontWeight: FontWeight.medium, marginTop: Spacing.sm, marginBottom: Spacing.lg },
     profitPositive: { color: Colors.success },
     profitNegative: { color: Colors.danger },
-    sizesCard: { marginBottom: Spacing.xl },
-    sizeInputRow: { flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.md },
-    sizeLabelWrap: { width: 48, height: 48, borderRadius: BorderRadius.md, backgroundColor: Colors.surfaceHighlight, alignItems: 'center', justifyContent: 'center', marginRight: Spacing.md, marginTop: LABEL_OFFSET },
-    sizeInputLabel: { color: Colors.text, fontSize: FontSize.md, fontWeight: FontWeight.bold },
-    removeSizeBtn: { padding: Spacing.sm, marginTop: LABEL_OFFSET, marginLeft: Spacing.sm },
     saveBtn: { marginTop: Spacing.lg }
 });

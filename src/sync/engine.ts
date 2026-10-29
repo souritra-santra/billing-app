@@ -4,12 +4,16 @@ import { CLOUD_SYNC_ENABLED } from './config';
 import { supabase } from './client';
 import { getActiveShop } from './activeShop';
 
-type SyncTransaction = Pick<SQLiteDatabase, 'runAsync' | 'getFirstAsync'>;
+type SyncTransaction = Pick<
+  SQLiteDatabase,
+  'runAsync' | 'getFirstAsync'
+>;
 
 const PUSH_BATCH_SIZE = 100;
 const PULL_PAGE_SIZE = 200;
 const MAX_PUSH_BATCHES = 20;
 const MAX_PULL_PAGES = 50;
+const BASELINE_CREATED_AT = '1970-01-01 00:00:00';
 
 export interface SyncStatus {
   configured: boolean;
@@ -76,6 +80,10 @@ function pulledSeqKey(shopId: string): string {
   return `last_pulled_seq:${shopId}`;
 }
 
+function operationalSnapshotKey(shopId: string): string {
+  return `ops_snapshot:${shopId}`;
+}
+
 /**
  * If two devices created a type with the same name but different ids, the
  * second one is merged by name. The map keeps later product pulls pointing at
@@ -96,6 +104,23 @@ function describeError(error: unknown): string {
     );
   }
   return String(error);
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function stringOr(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function numberOr(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function timestampOr(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
 export async function getPendingCount(): Promise<number> {
@@ -131,11 +156,40 @@ export async function getSyncStatus(): Promise<SyncStatus> {
   };
 }
 
-/** Queue the whole local catalogue for upload (used when linking a new shop). */
+/**
+ * Queue the whole local shop for upload when linking a new cloud shop.
+ *
+ * Inventory is uploaded as one baseline movement per product/size. That keeps
+ * the server's append-only stock ledger consistent without replaying every
+ * historical sale. Operational rows (customers, bills, bill lines) are queued
+ * as well, in dependency order.
+ */
 export async function enqueueLocalSnapshot(): Promise<void> {
+  const shop = await getActiveShop();
   const db = await getDatabase();
+
   await db.withExclusiveTransactionAsync(async (txn) => {
-    await txn.execAsync(`
+    await txn.runAsync('DELETE FROM sync_outbox');
+    await txn.runAsync('DELETE FROM stock_movements');
+
+    // Inventory is the net result of all old activity. One baseline movement
+    // represents the stock already on this device.
+    await txn.runAsync(
+      `INSERT INTO stock_movements
+         (id, product_id, size, delta, reason, created_at)
+       SELECT
+         'baseline-' || product_id || '-' || hex(size),
+         product_id,
+         size,
+         quantity,
+         'baseline',
+         ?
+       FROM inventory
+       WHERE quantity <> 0`,
+      [BASELINE_CREATED_AT]
+    );
+
+    await txn.runAsync(`
       INSERT OR REPLACE INTO sync_outbox
         (id, entity, entity_id, op, payload, attempts, last_error, created_at)
       SELECT
@@ -157,7 +211,9 @@ export async function enqueueLocalSnapshot(): Promise<void> {
       FROM product_types;
     `);
 
-    await txn.execAsync(`
+    // Include deleted products/customers/orders as tombstones so bills that
+    // reference them still satisfy the server foreign keys.
+    await txn.runAsync(`
       INSERT OR REPLACE INTO sync_outbox
         (id, entity, entity_id, op, payload, attempts, last_error, created_at)
       SELECT
@@ -173,7 +229,7 @@ export async function enqueueLocalSnapshot(): Promise<void> {
           'colour', colour,
           'cost_price', cost_price,
           'price', price,
-          'barcode', barcode,
+          'barcode', CASE WHEN deleted_at IS NULL THEN barcode ELSE NULL END,
           'created_at', created_at,
           'updated_at', COALESCE(updated_at, datetime('now')),
           'deleted_at', deleted_at,
@@ -182,10 +238,216 @@ export async function enqueueLocalSnapshot(): Promise<void> {
         0,
         NULL,
         datetime('now')
-      FROM products
-      WHERE deleted_at IS NULL;
+      FROM products;
+    `);
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'customers',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'name', name,
+          'phone', phone,
+          'total_purchase', total_purchase,
+          'due_amount', due_amount,
+          'created_at', created_at,
+          'updated_at', COALESCE(updated_at, datetime('now')),
+          'deleted_at', deleted_at,
+          'version', COALESCE(version, 1)
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM customers;
+    `);
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'orders',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'date', date,
+          'customer_id', customer_id,
+          'total_amount', total_amount,
+          'discount', discount,
+          'tax', tax,
+          'final_amount', final_amount,
+          'payment_mode', payment_mode,
+          'created_at', COALESCE(created_at, date, datetime('now')),
+          'updated_at', COALESCE(updated_at, date, datetime('now')),
+          'deleted_at', deleted_at,
+          'version', COALESCE(version, 1)
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM orders;
+    `);
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'order_items',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'order_id', order_id,
+          'product_id', product_id,
+          'size', size,
+          'quantity', quantity,
+          'price', price,
+          'created_at', COALESCE(created_at, datetime('now'))
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM order_items;
     `);
   });
+
+  if (shop) {
+    await setState(operationalSnapshotKey(shop.id), '1');
+  }
+}
+
+/**
+ * One-time backfill for shops linked before operational sync existed.
+ *
+ * The baseline is `current inventory - existing local movements`, because any
+ * movements created after this build are already queued/synced and must not be
+ * counted twice.
+ */
+async function enqueueOperationalBackfill(shopId: string): Promise<void> {
+  if ((await getState(operationalSnapshotKey(shopId))) === '1') return;
+
+  const db = await getDatabase();
+  await db.withExclusiveTransactionAsync(async (txn) => {
+    await txn.runAsync(
+      `INSERT OR IGNORE INTO stock_movements
+         (id, product_id, size, delta, reason, created_at)
+       SELECT
+         'baseline-' || product_id || '-' || hex(size),
+         product_id,
+         size,
+         delta,
+         'baseline',
+         ?
+       FROM (
+         SELECT
+           i.product_id,
+           i.size,
+           i.quantity - COALESCE((
+             SELECT SUM(m.delta)
+             FROM stock_movements m
+             WHERE m.product_id = i.product_id AND m.size = i.size
+           ), 0) AS delta
+         FROM inventory i
+       ) b
+       WHERE b.delta <> 0`,
+      [BASELINE_CREATED_AT]
+    );
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'customers',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'name', name,
+          'phone', phone,
+          'total_purchase', total_purchase,
+          'due_amount', due_amount,
+          'created_at', created_at,
+          'updated_at', COALESCE(updated_at, datetime('now')),
+          'deleted_at', deleted_at,
+          'version', COALESCE(version, 1)
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM customers;
+    `);
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'orders',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'date', date,
+          'customer_id', customer_id,
+          'total_amount', total_amount,
+          'discount', discount,
+          'tax', tax,
+          'final_amount', final_amount,
+          'payment_mode', payment_mode,
+          'created_at', COALESCE(created_at, date, datetime('now')),
+          'updated_at', COALESCE(updated_at, date, datetime('now')),
+          'deleted_at', deleted_at,
+          'version', COALESCE(version, 1)
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM orders;
+    `);
+
+    await txn.runAsync(`
+      INSERT OR REPLACE INTO sync_outbox
+        (id, entity, entity_id, op, payload, attempts, last_error, created_at)
+      SELECT
+        lower(hex(randomblob(16))),
+        'order_items',
+        id,
+        'upsert',
+        json_object(
+          'id', id,
+          'order_id', order_id,
+          'product_id', product_id,
+          'size', size,
+          'quantity', quantity,
+          'price', price,
+          'created_at', COALESCE(created_at, datetime('now'))
+        ),
+        0,
+        NULL,
+        datetime('now')
+      FROM order_items;
+    `);
+
+    await txn.runAsync(
+      'INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)',
+      [operationalSnapshotKey(shopId), '1']
+    );
+  });
+}
+
+/** Joining in pull mode leaves local operational rows on-device and skips upload. */
+export async function markOperationalSnapshotComplete(shopId?: string): Promise<void> {
+  const shop = shopId ? { id: shopId } : await getActiveShop();
+  if (!shop) return;
+  await setState(operationalSnapshotKey(shop.id), '1');
 }
 
 /** Drop queued local writes (used when joining an existing cloud shop). */
@@ -203,7 +465,21 @@ async function pushOutbox(shopId: string): Promise<void> {
     const rows = await db.getAllAsync<OutboxRow>(
       `SELECT id, entity, entity_id, op, payload, attempts
        FROM sync_outbox
-       ORDER BY CASE entity WHEN 'product_types' THEN 0 ELSE 1 END, created_at
+       ORDER BY CASE entity
+         WHEN 'product_types' THEN 0
+         WHEN 'products' THEN 1
+         WHEN 'customers' THEN 2
+         WHEN 'orders' THEN 3
+         WHEN 'order_items' THEN 4
+         WHEN 'stock_movements' THEN 5
+         ELSE 6
+       END,
+       CASE
+         WHEN entity = 'stock_movements'
+           AND json_extract(payload, '$.reason') = 'baseline' THEN 0
+         ELSE 1
+       END,
+       created_at, rowid
        LIMIT ?`,
       [PUSH_BATCH_SIZE]
     );
@@ -305,6 +581,43 @@ async function ensureProductType(
   );
 }
 
+async function ensureCustomer(
+  txn: SyncTransaction,
+  customerId: string | null,
+  createdAt: string
+): Promise<void> {
+  if (!customerId) return;
+  const existing = await txn.getFirstAsync<{ id: string }>(
+    'SELECT id FROM customers WHERE id = ?',
+    [customerId]
+  );
+  if (existing) return;
+  await txn.runAsync(
+    `INSERT OR IGNORE INTO customers
+       (id, name, phone, created_at, updated_at, version)
+     VALUES (?, 'Customer', NULL, ?, ?, 1)`,
+    [customerId, createdAt, createdAt]
+  );
+}
+
+async function ensureOrder(
+  txn: SyncTransaction,
+  orderId: string,
+  createdAt: string
+): Promise<void> {
+  const existing = await txn.getFirstAsync<{ id: string }>(
+    'SELECT id FROM orders WHERE id = ?',
+    [orderId]
+  );
+  if (existing) return;
+  await txn.runAsync(
+    `INSERT OR IGNORE INTO orders
+       (id, date, created_at, updated_at, version)
+     VALUES (?, ?, ?, ?, 1)`,
+    [orderId, createdAt, createdAt, createdAt]
+  );
+}
+
 async function applyProductType(
   txn: SyncTransaction,
   change: ChangeRow
@@ -333,6 +646,37 @@ async function applyProductType(
       ? payload.updated_at
       : new Date().toISOString();
   const version = Number(payload.version) || 1;
+
+  if (deletedAt) {
+    const existing = await txn.getFirstAsync<{ id: string }>(
+      'SELECT id FROM product_types WHERE id = ?',
+      [id]
+    );
+    if (existing) {
+      await txn.runAsync(
+        `UPDATE product_types
+         SET deleted_at = ?, updated_at = ?, version = ?
+         WHERE id = ?`,
+        [deletedAt, updatedAt, version, id]
+      );
+      return;
+    }
+
+    // A remote tombstone must still exist locally so products and bills that
+    // reference its id keep valid foreign keys.
+    const conflict = await txn.getFirstAsync<{ id: string }>(
+      'SELECT id FROM product_types WHERE lower(name) = lower(?) AND id <> ?',
+      [name, id]
+    );
+    const tombstoneName = conflict ? `${name} (deleted ${id})` : name;
+    await txn.runAsync(
+      `INSERT OR IGNORE INTO product_types
+         (id, name, created_at, updated_at, deleted_at, version)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, tombstoneName, createdAt, updatedAt, deletedAt, version]
+    );
+    return;
+  }
 
   const nameConflict = await txn.getFirstAsync<{
     id: string;
@@ -385,19 +729,61 @@ async function applyProduct(
         : null;
 
   if (deletedAt) {
-    await txn.runAsync(
-      `UPDATE products
-       SET deleted_at = ?, barcode = NULL, updated_at = ?, version = ?
-       WHERE id = ?`,
-      [
-        deletedAt,
+    const existing = await txn.getFirstAsync<{ id: string }>(
+      'SELECT id FROM products WHERE id = ?',
+      [id]
+    );
+    if (existing) {
+      await txn.runAsync(
+        `UPDATE products
+         SET deleted_at = ?, barcode = NULL, updated_at = ?, version = ?
+         WHERE id = ?`,
+        [
+          deletedAt,
+          typeof payload.updated_at === 'string'
+            ? payload.updated_at
+            : new Date().toISOString(),
+          Number(payload.version) || 1,
+          id,
+        ]
+      );
+    } else {
+      // Keep a local tombstone for bills that still reference this product.
+      const remoteTypeId = String(payload.type_id || '').trim();
+      const mappedTypeId = remoteTypeId
+        ? await getMappedTypeId(txn, remoteTypeId)
+        : null;
+      const typeId = mappedTypeId || remoteTypeId || 'pt-008';
+      await ensureProductType(txn, typeId);
+
+      const createdAt =
+        typeof payload.created_at === 'string'
+          ? payload.created_at
+          : new Date().toISOString();
+      const updatedAt =
         typeof payload.updated_at === 'string'
           ? payload.updated_at
-          : new Date().toISOString(),
-        Number(payload.version) || 1,
-        id,
-      ]
-    );
+          : new Date().toISOString();
+      await txn.runAsync(
+        `INSERT OR IGNORE INTO products
+           (id, name, type_id, brand, colour, cost_price, price, barcode,
+            created_at, updated_at, deleted_at, version)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+        [
+          id,
+          String(payload.name || 'Deleted product'),
+          typeId,
+          typeof payload.brand === 'string' ? payload.brand : null,
+          typeof payload.colour === 'string' ? payload.colour : null,
+          Number(payload.cost_price) || 0,
+          Number(payload.price) || 0,
+          createdAt,
+          updatedAt,
+          deletedAt,
+          Number(payload.version) || 1,
+        ]
+      );
+    }
     await txn.runAsync('DELETE FROM inventory WHERE product_id = ?', [id]);
     return;
   }
@@ -465,6 +851,241 @@ async function applyProduct(
   );
 }
 
+async function applyCustomer(
+  txn: SyncTransaction,
+  change: ChangeRow
+): Promise<void> {
+  const payload = change.payload || {};
+  const id = String(payload.id || '');
+  if (!id) return;
+
+  const createdAt = timestampOr(payload.created_at, new Date().toISOString());
+  const deletedAt =
+    change.op === 'delete'
+      ? new Date().toISOString()
+      : stringOrNull(payload.deleted_at);
+  const updatedAt = timestampOr(payload.updated_at, createdAt);
+
+  await txn.runAsync(
+    `INSERT INTO customers
+       (id, name, phone, total_purchase, due_amount, created_at, updated_at,
+        deleted_at, version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       phone = excluded.phone,
+       total_purchase = excluded.total_purchase,
+       due_amount = excluded.due_amount,
+       updated_at = excluded.updated_at,
+       deleted_at = excluded.deleted_at,
+       version = excluded.version`,
+    [
+      id,
+      stringOr(payload.name, 'Customer'),
+      stringOrNull(payload.phone),
+      numberOr(payload.total_purchase),
+      numberOr(payload.due_amount),
+      createdAt,
+      updatedAt,
+      deletedAt,
+      numberOr(payload.version, 1),
+    ]
+  );
+}
+
+async function applyOrder(
+  txn: SyncTransaction,
+  change: ChangeRow
+): Promise<void> {
+  const payload = change.payload || {};
+  const id = String(payload.id || '');
+  if (!id) return;
+
+  const createdAt = timestampOr(payload.created_at, new Date().toISOString());
+  const updatedAt = timestampOr(payload.updated_at, createdAt);
+  const deletedAt =
+    change.op === 'delete'
+      ? new Date().toISOString()
+      : stringOrNull(payload.deleted_at);
+
+  if (deletedAt) {
+    await txn.runAsync(
+      `INSERT INTO orders
+         (id, date, created_at, updated_at, deleted_at, version)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         updated_at = excluded.updated_at,
+         deleted_at = excluded.deleted_at,
+         version = excluded.version`,
+      [id, createdAt, createdAt, updatedAt, deletedAt, numberOr(payload.version, 1)]
+    );
+    return;
+  }
+
+  const customerId = stringOrNull(payload.customer_id);
+  await ensureCustomer(txn, customerId, createdAt);
+
+  await txn.runAsync(
+    `INSERT INTO orders
+       (id, date, customer_id, total_amount, discount, tax, final_amount,
+        payment_mode, created_at, updated_at, deleted_at, version)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       date = excluded.date,
+       customer_id = excluded.customer_id,
+       total_amount = excluded.total_amount,
+       discount = excluded.discount,
+       tax = excluded.tax,
+       final_amount = excluded.final_amount,
+       payment_mode = excluded.payment_mode,
+       updated_at = excluded.updated_at,
+       deleted_at = NULL,
+       version = excluded.version`,
+    [
+      id,
+      timestampOr(payload.date, createdAt),
+      customerId,
+      numberOr(payload.total_amount),
+      numberOr(payload.discount),
+      numberOr(payload.tax),
+      numberOr(payload.final_amount),
+      stringOr(payload.payment_mode, 'cash'),
+      createdAt,
+      updatedAt,
+      numberOr(payload.version, 1),
+    ]
+  );
+}
+
+async function applyOrderItem(
+  txn: SyncTransaction,
+  change: ChangeRow
+): Promise<void> {
+  const payload = change.payload || {};
+  const id = String(payload.id || '');
+  if (!id) return;
+
+  if (change.op === 'delete') {
+    await txn.runAsync('DELETE FROM order_items WHERE id = ?', [id]);
+    return;
+  }
+
+  const orderId = stringOrNull(payload.order_id);
+  const productId = stringOrNull(payload.product_id);
+  if (!orderId || !productId) return;
+
+  const createdAt = timestampOr(payload.created_at, new Date().toISOString());
+  await ensureOrder(txn, orderId, createdAt);
+
+  const product = await txn.getFirstAsync<{ id: string }>(
+    'SELECT id FROM products WHERE id = ?',
+    [productId]
+  );
+  if (!product) return;
+
+  await txn.runAsync(
+    `INSERT INTO order_items
+       (id, order_id, product_id, size, quantity, price, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       order_id = excluded.order_id,
+       product_id = excluded.product_id,
+       size = excluded.size,
+       quantity = excluded.quantity,
+       price = excluded.price`,
+    [
+      id,
+      orderId,
+      productId,
+      stringOr(payload.size, ''),
+      Math.max(1, Math.floor(numberOr(payload.quantity, 1))),
+      numberOr(payload.price),
+      createdAt,
+    ]
+  );
+}
+
+async function applyStockMovement(
+  txn: SyncTransaction,
+  change: ChangeRow
+): Promise<void> {
+  const payload = change.payload || {};
+  const id = String(payload.id || '');
+  const productId = stringOrNull(payload.product_id);
+  const size = stringOr(payload.size, '');
+  const delta = Math.trunc(numberOr(payload.delta));
+  if (!id || !productId || !size || delta === 0) return;
+
+  const reason = stringOr(payload.reason, 'adjustment');
+  const inserted = await txn.runAsync(
+    `INSERT OR IGNORE INTO stock_movements
+       (id, product_id, size, delta, reason, order_id, device_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      productId,
+      size,
+      delta,
+      reason,
+      stringOrNull(payload.order_id),
+      stringOrNull(payload.device_id),
+      timestampOr(payload.created_at, new Date().toISOString()),
+    ]
+  );
+  if (!inserted.changes) return;
+
+  const product = await txn.getFirstAsync<{ deleted_at: string | null }>(
+    'SELECT deleted_at FROM products WHERE id = ?',
+    [productId]
+  );
+  if (!product || product.deleted_at) return;
+
+  if (reason === 'baseline') {
+    // A baseline is an absolute starting count, not a delta. Resetting avoids
+    // double-counting when a device that already has local stock pulls it.
+    await txn.runAsync(
+      `INSERT INTO inventory (id, product_id, size, quantity)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(product_id, size) DO UPDATE SET
+         quantity = excluded.quantity`,
+      [generateId(), productId, size, Math.max(0, delta)]
+    );
+    return;
+  }
+
+  await txn.runAsync(
+    `INSERT INTO inventory (id, product_id, size, quantity)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(product_id, size) DO UPDATE SET
+       quantity = MAX(0, quantity + ?)`,
+    [
+      generateId(),
+      productId,
+      size,
+      Math.max(0, delta),
+      delta,
+    ]
+  );
+}
+
+async function recalculateCustomerTotalsInTxn(txn: SyncTransaction): Promise<void> {
+  await txn.runAsync(`
+    UPDATE customers AS c
+    SET total_purchase = COALESCE((
+          SELECT SUM(o.final_amount)
+          FROM orders o
+          WHERE o.customer_id = c.id AND o.deleted_at IS NULL
+        ), 0),
+        updated_at = datetime('now')
+    WHERE c.deleted_at IS NULL
+      AND c.total_purchase <> COALESCE((
+          SELECT SUM(o.final_amount)
+          FROM orders o
+          WHERE o.customer_id = c.id AND o.deleted_at IS NULL
+        ), 0);
+  `);
+}
+
 async function applyChanges(changes: ChangeRow[]): Promise<void> {
   if (changes.length === 0) return;
   const db = await getDatabase();
@@ -479,8 +1100,19 @@ async function applyChanges(changes: ChangeRow[]): Promise<void> {
           await applyProductType(txn, change);
         } else if (change.entity === 'products') {
           await applyProduct(txn, change);
+        } else if (change.entity === 'customers') {
+          await applyCustomer(txn, change);
+        } else if (change.entity === 'orders') {
+          await applyOrder(txn, change);
+        } else if (change.entity === 'order_items') {
+          await applyOrderItem(txn, change);
+        } else if (change.entity === 'stock_movements') {
+          await applyStockMovement(txn, change);
         }
       }
+      // Bills can arrive after the customer row, and another device cannot know
+      // our local order history. Sum the ledger so totals converge.
+      await recalculateCustomerTotalsInTxn(txn);
     } finally {
       await txn.runAsync(
         "UPDATE sync_state SET value = '0' WHERE key = 'applying_remote'"
@@ -533,6 +1165,7 @@ export async function syncNow(): Promise<SyncStatus> {
       const { data: sessionData } = await supabase.auth.getSession();
       if (!sessionData.session) return getSyncStatus();
 
+      await enqueueOperationalBackfill(shop.id);
       await pushOutbox(shop.id);
       await pullChanges(shop.id);
 

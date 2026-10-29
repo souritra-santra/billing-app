@@ -60,7 +60,8 @@ export const translations: Record<Language, Record<string, string>> = {
 
         // ---------- Cloud sync ----------
         'cloud.title': 'Cloud Sync',
-        'cloud.subtitle': 'Back up this shop and use AI without a local proxy.',
+        'cloud.subtitle':
+            'Back up the catalogue, stock and bills for this shop, and use AI without a local proxy.',
         'cloud.configureTitle': 'Connect Supabase',
         'cloud.configureBody':
             'Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to .env, then restart Expo with npx expo start -c. The app keeps working offline without them.',
@@ -94,9 +95,9 @@ export const translations: Record<Language, Record<string, string>> = {
         'cloud.mergeNote':
             'This build keeps a separate local database per shop once your first shop is linked.',
         'cloud.joinPullConfirm':
-            'Join this shop and pull its cloud catalogue? Local products from another shop stay on this device but are not uploaded.',
+            'Join this shop and pull its cloud catalogue, stock and bills? Local rows from another shop stay on this device but are not uploaded.',
         'cloud.joinUploadConfirm':
-            'Join this shop and upload its local catalogue? The first linked shop reuses your existing data; additional shops start with a fresh local database.',
+            'Join this shop and upload the local catalogue, stock and bills? The first linked shop reuses your existing data; additional shops start with a fresh local database.',
         'cloud.switchConfirm': 'Switch to {name}? The app will reopen its local database.',
         'cloud.error': 'Cloud sync error',
         'cloud.success': 'Synced',
@@ -382,6 +383,10 @@ export const translations: Record<Language, Record<string, string>> = {
         'ai.quantityPlaceholder': 'Pieces',
         'ai.size': 'Size',
         'ai.sizePlaceholder': 'e.g. M',
+        'ai.sizes': 'Stock by size',
+        'ai.sizesHint':
+            'Enter the quantity for each size, or add another size. This is the same size grid used when adding a product.',
+        'ai.noSizes': 'No sizes added yet.',
         'ai.barcode': 'Barcode',
         'ai.barcodePlaceholder': 'Only if printed on the document',
         'ai.receiveStock': 'Receive stock',
@@ -572,7 +577,8 @@ export const translations: Record<Language, Record<string, string>> = {
 
         // ---------- Cloud sync ----------
         'cloud.title': 'ক্লাউড সিঙ্ক',
-        'cloud.subtitle': 'এই দোকান ব্যাকআপ করুন এবং লোকাল প্রক্সি ছাড়াই এআই ব্যবহার করুন।',
+        'cloud.subtitle':
+            'এই দোকানের ক্যাটালগ, স্টক ও বিল ব্যাকআপ করুন এবং লোকাল প্রক্সি ছাড়াই এআই ব্যবহার করুন।',
         'cloud.configureTitle': 'Supabase সংযুক্ত করুন',
         'cloud.configureBody':
             '.env ফাইলে EXPO_PUBLIC_SUPABASE_URL এবং EXPO_PUBLIC_SUPABASE_ANON_KEY যোগ করুন, তারপর npx expo start -c দিয়ে Expo চালু করুন। এগুলো ছাড়াও অ্যাপ অফলাইনে কাজ করবে।',
@@ -604,9 +610,9 @@ export const translations: Record<Language, Record<string, string>> = {
         'cloud.localOnlyNote': 'আপনার ডেটা এই ডিভাইসে থাকে। সাইন আউট করলে মুছে যাবে না।',
         'cloud.mergeNote': 'প্রথম দোকান সংযুক্ত হলে প্রতিটি দোকানের জন্য আলাদা লোকাল ডেটাবেস থাকবে।',
         'cloud.joinPullConfirm':
-            'এই দোকানে যোগ দিয়ে ক্লাউড ক্যাটালগ আনবেন? অন্য দোকানের লোকাল পণ্য এই ডিভাইসে থাকবে কিন্তু আপলোড হবে না।',
+            'এই দোকানে যোগ দিয়ে এর ক্লাউড ক্যাটালগ, স্টক ও বিল আনবেন? অন্য দোকানের লোকাল ডেটা এই ডিভাইসে থাকবে কিন্তু আপলোড হবে না।',
         'cloud.joinUploadConfirm':
-            'এই দোকানে যোগ দিয়ে এর লোকাল ক্যাটালগ আপলোড করবেন? প্রথম সংযুক্ত দোকান আপনার বিদ্যমান ডেটা ব্যবহার করে; পরের দোকানগুলো নতুন লোকাল ডেটাবেস দিয়ে শুরু হয়।',
+            'এই দোকানে যোগ দিয়ে এর লোকাল ক্যাটালগ, স্টক ও বিল আপলোড করবেন? প্রথম সংযুক্ত দোকান আপনার বিদ্যমান ডেটা ব্যবহার করে; পরের দোকানগুলো নতুন লোকাল ডেটাবেস দিয়ে শুরু হয়।',
         'cloud.switchConfirm': '{name}-এ যাবেন? অ্যাপটি তার লোকাল ডেটাবেস খুলবে।',
         'cloud.error': 'ক্লাউড সিঙ্ক ত্রুটি',
         'cloud.success': 'সিঙ্ক হয়েছে',
@@ -890,6 +896,10 @@ export const translations: Record<Language, Record<string, string>> = {
         'ai.quantityPlaceholder': 'পিস',
         'ai.size': 'সাইজ',
         'ai.sizePlaceholder': 'যেমন M',
+        'ai.sizes': 'সাইজ অনুযায়ী স্টক',
+        'ai.sizesHint':
+            'প্রতিটি সাইজের পরিমাণ লিখুন, অথবা আরেকটি সাইজ যোগ করুন। পণ্য যোগ করার সময় একই সাইজ গ্রিড ব্যবহার হয়।',
+        'ai.noSizes': 'এখনো কোনো সাইজ যোগ করা হয়নি।',
         'ai.barcode': 'বারকোড',
         'ai.barcodePlaceholder': 'শুধু ডকুমেন্টে ছাপা থাকলে',
         'ai.receiveStock': 'স্টক গ্রহণ করুন',

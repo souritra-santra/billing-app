@@ -39,7 +39,10 @@ export const CREATE_TABLES_SQL = `
     phone TEXT,
     total_purchase REAL NOT NULL DEFAULT 0,
     due_amount REAL NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1
   );
 
   CREATE TABLE IF NOT EXISTS orders (
@@ -51,6 +54,10 @@ export const CREATE_TABLES_SQL = `
     tax REAL NOT NULL DEFAULT 0,
     final_amount REAL NOT NULL DEFAULT 0,
     payment_mode TEXT NOT NULL DEFAULT 'cash',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (customer_id) REFERENCES customers(id)
   );
 
@@ -61,7 +68,23 @@ export const CREATE_TABLES_SQL = `
     size TEXT NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
     price REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (order_id) REFERENCES orders(id),
+    FOREIGN KEY (product_id) REFERENCES products(id)
+  );
+
+  -- Append-only stock changes. Inventory remains a fast local cache; syncing
+  -- deltas (instead of absolute quantities) prevents two devices from silently
+  -- overwriting each other's sales and stock receipts.
+  CREATE TABLE IF NOT EXISTS stock_movements (
+    id TEXT PRIMARY KEY,
+    product_id TEXT NOT NULL,
+    size TEXT NOT NULL,
+    delta INTEGER NOT NULL,
+    reason TEXT NOT NULL DEFAULT 'adjustment',
+    order_id TEXT,
+    device_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (product_id) REFERENCES products(id)
   );
 
@@ -104,6 +127,7 @@ export const CREATE_TABLES_SQL = `
     supplier_name TEXT,
     invoice_number TEXT,
     confidence REAL,
+    sizes_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending',
     product_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -118,6 +142,8 @@ export const CREATE_TABLES_SQL = `
   CREATE INDEX IF NOT EXISTS idx_orders_date ON orders(date);
   CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
   CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+  CREATE INDEX IF NOT EXISTS idx_stock_movements_product ON stock_movements(product_id, size);
+  CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements(created_at);
   CREATE INDEX IF NOT EXISTS idx_ai_sessions_created ON ai_import_sessions(created_at);
   CREATE INDEX IF NOT EXISTS idx_ai_drafts_session ON ai_product_drafts(session_id);
   CREATE INDEX IF NOT EXISTS idx_ai_drafts_status ON ai_product_drafts(status);

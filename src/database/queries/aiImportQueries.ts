@@ -1,5 +1,6 @@
 import { getDatabase, generateId } from '../db';
 import {
+  AiDraftSize,
   AiDraftStatus,
   AiExtractionResult,
   AiImportMode,
@@ -20,6 +21,7 @@ export interface AiDraftInput {
   mrp: number | null;
   quantity: number | null;
   size: string | null;
+  sizes?: AiDraftSize[] | null;
   colour: string | null;
   barcode: string | null;
   supplier_name: string | null;
@@ -55,6 +57,29 @@ function parseWarnings(json: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function parseSizes(json: string | null | undefined): AiDraftSize[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => ({
+        size: String((entry as { size?: unknown })?.size ?? '').trim(),
+        quantity: Math.floor(Number((entry as { quantity?: unknown })?.quantity)),
+      }))
+      .filter(
+        (entry) => entry.size.length > 0 && Number.isFinite(entry.quantity) && entry.quantity > 0
+      );
+  } catch {
+    return [];
+  }
+}
+
+function mapDraft(row: AiProductDraft & { sizes_json?: string | null }): AiProductDraft {
+  const { sizes_json, ...draft } = row;
+  return { ...draft, sizes: parseSizes(sizes_json) };
 }
 
 function mapSession(row: SessionRow & { draft_count?: number }): AiImportSession {
@@ -136,8 +161,8 @@ export async function saveAiDrafts(
         `INSERT INTO ai_product_drafts (
            id, session_id, name, brand, type_id, type_hint, cost_price, mrp,
            quantity, size, colour, barcode, supplier_name, invoice_number,
-           confidence, status
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+           confidence, sizes_json, status
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           generateId(),
           sessionId,
@@ -154,6 +179,7 @@ export async function saveAiDrafts(
           draft.supplier_name,
           draft.invoice_number,
           draft.confidence,
+          JSON.stringify(draft.sizes ?? []),
         ]
       );
     }
@@ -189,25 +215,33 @@ export async function getAiDraftsForSession(
   sessionId: string
 ): Promise<AiProductDraft[]> {
   const db = await getDatabase();
-  return db.getAllAsync<AiProductDraft>(
+  const rows = await db.getAllAsync<AiProductDraft & { sizes_json?: string | null }>(
     `SELECT * FROM ai_product_drafts
      WHERE session_id = ?
      ORDER BY created_at ASC, rowid ASC`,
     [sessionId]
   );
+  return rows.map(mapDraft);
 }
 
 export async function updateAiDraft(
   id: string,
   patch: AiDraftUpdate
 ): Promise<void> {
-  const columns = UPDATABLE_DRAFT_COLUMNS.filter(
+  const columns: string[] = UPDATABLE_DRAFT_COLUMNS.filter(
     (column) => patch[column] !== undefined
   );
+  const values: (string | number | null)[] = columns.map((column) => {
+    const value = patch[column as keyof AiDraftInput];
+    return value === undefined || value === null ? null : (value as string | number);
+  });
+  if (patch.sizes !== undefined) {
+    columns.push('sizes_json');
+    values.push(JSON.stringify(patch.sizes ?? []));
+  }
   if (columns.length === 0) return;
 
   const db = await getDatabase();
-  const values = columns.map((column) => patch[column] ?? null);
   await db.runAsync(
     `UPDATE ai_product_drafts
      SET ${columns.map((column) => `${column} = ?`).join(', ')},

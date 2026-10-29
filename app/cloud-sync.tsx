@@ -28,6 +28,7 @@ import {
     clearOutbox,
     enqueueLocalSnapshot,
     getSyncStatus,
+    markOperationalSnapshotComplete,
     syncNow,
     SyncStatus,
 } from '../src/sync/engine';
@@ -195,6 +196,10 @@ export default function CloudSyncScreen() {
             await enqueueLocalSnapshot();
         } else if (mode === 'pull') {
             await clearOutbox();
+            // Pull mode intentionally leaves existing local bills/stock alone.
+            // Mark the operational backfill done so those rows are not uploaded
+            // into the joined shop on the next sync.
+            await markOperationalSnapshotComplete(shop.id);
         }
 
         const next = await syncNow();

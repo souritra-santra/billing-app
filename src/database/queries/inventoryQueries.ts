@@ -1,6 +1,47 @@
 import { getDatabase, generateId } from '../db';
 import { InventoryItem } from '../../types/models';
 
+export interface StockMovementOptions {
+    /** Why the stock changed. Stored on the sync movement. */
+    reason?: string;
+    /** Attach a sale movement to its bill. */
+    orderId?: string | null;
+    /** Deterministic id used by the one-time inventory baseline. */
+    movementId?: string;
+    /** Override the movement timestamp (baselines sort before real changes). */
+    createdAt?: string;
+}
+
+/**
+ * Record one append-only stock delta. Inventory itself remains the fast local
+ * cache; the movement is what syncs between devices.
+ */
+export async function recordStockMovement(
+    productId: string,
+    size: string,
+    delta: number,
+    options: StockMovementOptions = {}
+): Promise<void> {
+    const change = Math.trunc(delta);
+    if (!Number.isFinite(change) || change === 0) return;
+
+    const db = await getDatabase();
+    await db.runAsync(
+        `INSERT OR IGNORE INTO stock_movements
+           (id, product_id, size, delta, reason, order_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))`,
+        [
+            options.movementId ?? generateId(),
+            productId,
+            size,
+            change,
+            options.reason ?? 'adjustment',
+            options.orderId ?? null,
+            options.createdAt ?? null,
+        ]
+    );
+}
+
 export async function getInventoryForProduct(productId: string): Promise<InventoryItem[]> {
     const db = await getDatabase();
     return db.getAllAsync<InventoryItem>(
@@ -15,22 +56,31 @@ export async function setInventory(
     quantity: number
 ): Promise<void> {
     const db = await getDatabase();
+    const nextQuantity = Math.max(0, Math.floor(Number(quantity) || 0));
     const existing = await db.getFirstAsync<InventoryItem>(
         'SELECT * FROM inventory WHERE product_id = ? AND size = ?',
         [productId, size]
     );
+
     if (existing) {
         await db.runAsync(
             'UPDATE inventory SET quantity = ? WHERE product_id = ? AND size = ?',
-            [quantity, productId, size]
+            [nextQuantity, productId, size]
         );
     } else {
         const id = generateId();
         await db.runAsync(
             'INSERT INTO inventory (id, product_id, size, quantity) VALUES (?, ?, ?, ?)',
-            [id, productId, size, quantity]
+            [id, productId, size, nextQuantity]
         );
     }
+
+    await recordStockMovement(
+        productId,
+        size,
+        nextQuantity - (existing?.quantity ?? 0),
+        { reason: 'adjustment' }
+    );
 }
 
 /**
@@ -40,9 +90,11 @@ export async function setInventory(
 export async function increaseStock(
     productId: string,
     size: string,
-    qty: number
+    qty: number,
+    options: StockMovementOptions = {}
 ): Promise<void> {
-    if (!Number.isFinite(qty) || qty <= 0) return;
+    const quantity = Math.floor(Number(qty) || 0);
+    if (quantity <= 0) return;
     const db = await getDatabase();
     const id = generateId();
     await db.runAsync(
@@ -50,20 +102,42 @@ export async function increaseStock(
          VALUES (?, ?, ?, ?)
          ON CONFLICT(product_id, size)
          DO UPDATE SET quantity = quantity + excluded.quantity`,
-        [id, productId, size, Math.floor(qty)]
+        [id, productId, size, quantity]
     );
+    await recordStockMovement(productId, size, quantity, {
+        reason: options.reason ?? 'stock_in',
+        orderId: options.orderId,
+        movementId: options.movementId,
+        createdAt: options.createdAt,
+    });
 }
 
 export async function reduceStock(
     productId: string,
     size: string,
-    qty: number
+    qty: number,
+    options: StockMovementOptions = {}
 ): Promise<void> {
+    const quantity = Math.floor(Number(qty) || 0);
+    if (quantity <= 0) return;
     const db = await getDatabase();
+    const existing = await db.getFirstAsync<InventoryItem>(
+        'SELECT * FROM inventory WHERE product_id = ? AND size = ?',
+        [productId, size]
+    );
+    const removed = Math.min(quantity, Math.max(0, existing?.quantity ?? 0));
+    if (removed <= 0) return;
+
     await db.runAsync(
         'UPDATE inventory SET quantity = MAX(0, quantity - ?) WHERE product_id = ? AND size = ?',
-        [qty, productId, size]
+        [removed, productId, size]
     );
+    await recordStockMovement(productId, size, -removed, {
+        reason: options.reason ?? 'sale',
+        orderId: options.orderId,
+        movementId: options.movementId,
+        createdAt: options.createdAt,
+    });
 }
 
 export async function getLowStockProducts(threshold: number = 5): Promise<any[]> {
@@ -91,5 +165,14 @@ export async function getTotalStock(productId: string): Promise<number> {
 
 export async function deleteInventoryForProduct(productId: string): Promise<void> {
     const db = await getDatabase();
+    const rows = await db.getAllAsync<InventoryItem>(
+        'SELECT * FROM inventory WHERE product_id = ?',
+        [productId]
+    );
     await db.runAsync('DELETE FROM inventory WHERE product_id = ?', [productId]);
+    for (const row of rows) {
+        await recordStockMovement(productId, row.size, -row.quantity, {
+            reason: 'adjustment',
+        });
+    }
 }

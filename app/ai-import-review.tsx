@@ -26,12 +26,21 @@ import AppCard from '../src/components/AppCard';
 import AppInput from '../src/components/AppInput';
 import Badge from '../src/components/Badge';
 import EmptyState from '../src/components/EmptyState';
+import SizeQuantityEditor from '../src/components/SizeQuantityEditor';
 import { useLanguage } from '../src/i18n';
 import {
   findDuplicateProduct,
   validateDraftForCreate,
   validateDraftForStock,
 } from '../src/ai/drafts';
+import {
+  EditableSize,
+  editableSizesFromDraft,
+  primarySize,
+  sizeRowsIssue,
+  sizeRowsToDraftSizes,
+  totalSizeQuantity,
+} from '../src/ai/sizes';
 import {
   AiDraftError,
   aiDraftErrorMessageKey,
@@ -65,6 +74,7 @@ interface DraftForm {
   mrp: string;
   quantity: string;
   size: string;
+  sizes: EditableSize[];
   colour: string;
   barcode: string;
   supplier: string;
@@ -91,6 +101,7 @@ function trimOrNull(value: string): string | null {
 }
 
 function draftToForm(draft: AiProductDraft): DraftForm {
+  const sizes = editableSizesFromDraft(draft);
   return {
     id: draft.id,
     sessionId: draft.session_id,
@@ -102,6 +113,7 @@ function draftToForm(draft: AiProductDraft): DraftForm {
     mrp: numberText(draft.mrp),
     quantity: numberText(draft.quantity),
     size: draft.size ?? '',
+    sizes,
     colour: draft.colour ?? '',
     barcode: draft.barcode ?? '',
     supplier: draft.supplier_name ?? '',
@@ -114,6 +126,7 @@ function draftToForm(draft: AiProductDraft): DraftForm {
 }
 
 function formToDraft(form: DraftForm): AiProductDraft {
+  const sizes = sizeRowsToDraftSizes(form.sizes);
   return {
     id: form.id,
     session_id: form.sessionId,
@@ -123,8 +136,9 @@ function formToDraft(form: DraftForm): AiProductDraft {
     type_hint: trimOrNull(form.typeHint),
     cost_price: parseMoney(form.cost),
     mrp: parseMoney(form.mrp),
-    quantity: parseQuantity(form.quantity),
-    size: trimOrNull(form.size),
+    quantity: sizes.length > 0 ? totalSizeQuantity(sizes) : parseQuantity(form.quantity),
+    size: primarySize(sizes) ?? trimOrNull(form.size),
+    sizes,
     colour: trimOrNull(form.colour),
     barcode: trimOrNull(form.barcode),
     supplier_name: trimOrNull(form.supplier),
@@ -138,19 +152,21 @@ function formToDraft(form: DraftForm): AiProductDraft {
 }
 
 function formPatch(form: DraftForm) {
+  const draft = formToDraft(form);
   return {
-    name: trimOrNull(form.name),
-    brand: trimOrNull(form.brand),
-    type_id: trimOrNull(form.typeId),
-    type_hint: trimOrNull(form.typeHint),
-    cost_price: parseMoney(form.cost),
-    mrp: parseMoney(form.mrp),
-    quantity: parseQuantity(form.quantity),
-    size: trimOrNull(form.size),
-    colour: trimOrNull(form.colour),
-    barcode: trimOrNull(form.barcode),
-    supplier_name: trimOrNull(form.supplier),
-    invoice_number: trimOrNull(form.invoiceNumber),
+    name: draft.name,
+    brand: draft.brand,
+    type_id: draft.type_id,
+    type_hint: draft.type_hint,
+    cost_price: draft.cost_price,
+    mrp: draft.mrp,
+    quantity: draft.quantity,
+    size: draft.size,
+    sizes: draft.sizes ?? [],
+    colour: draft.colour,
+    barcode: draft.barcode,
+    supplier_name: draft.supplier_name,
+    invoice_number: draft.invoice_number,
   };
 }
 
@@ -233,6 +249,26 @@ export default function AiImportReviewScreen() {
     );
   };
 
+  const updateSizes = (index: number, sizes: EditableSize[]) => {
+    const form = forms[index];
+    if (!form) return;
+    const complete = sizeRowsToDraftSizes(sizes);
+    const next: DraftForm = {
+      ...form,
+      sizes,
+      quantity: complete.length > 0 ? String(totalSizeQuantity(complete)) : '',
+      size: primarySize(complete) ?? '',
+    };
+    setForms((previous) =>
+      previous.map((form, formIndex) =>
+        formIndex === index ? next : form
+      )
+    );
+    void updateAiDraft(form.id, formPatch(next)).catch(() => {
+      // Edits are also persisted again on confirm.
+    });
+  };
+
   const persistForm = (form: DraftForm) => {
     void updateAiDraft(form.id, formPatch(form)).catch(() => {
       // Edits are also persisted again on confirm.
@@ -247,8 +283,16 @@ export default function AiImportReviewScreen() {
   };
 
   const labelCopies = (form: DraftForm, status: AiDraftStatus): number => {
-    if (status !== 'stock_added') return 1;
-    return Math.max(1, Math.floor(parseQuantity(form.quantity) ?? 1));
+    const entries = sizeRowsToDraftSizes(form.sizes);
+    const selectedSizes = form.sizes
+      .map((entry) => entry.size.trim())
+      .filter(Boolean);
+    if (status === 'stock_added') {
+      return entries.length > 0
+        ? Math.max(1, totalSizeQuantity(entries))
+        : Math.max(1, Math.floor(parseQuantity(form.quantity) ?? 1));
+    }
+    return Math.max(1, selectedSizes.length || 1);
   };
 
   const labelButtonTitle = (form: DraftForm, status: AiDraftStatus): string => {
@@ -258,27 +302,45 @@ export default function AiImportReviewScreen() {
       : t('ai.printLabel');
   };
 
-  const buildLabel = async (entry: ConfirmedDraft): Promise<LabelProduct | null> => {
+  const buildLabels = async (entry: ConfirmedDraft): Promise<LabelProduct[]> => {
     const product = await getProductById(entry.productId);
-    if (!product) return null;
-    return {
+    if (!product) return [];
+
+    const sizes = sizeRowsToDraftSizes(entry.form.sizes);
+    const selectedSizes = entry.form.sizes
+      .map((row) => row.size.trim())
+      .filter(Boolean);
+    const fallbackSize = entry.form.size.trim() || product.size || '';
+    const fallbackQty = Math.max(
+      1,
+      Math.floor(parseQuantity(entry.form.quantity) ?? 1)
+    );
+    const rows =
+      entry.status === 'stock_added'
+        ? sizes.length > 0
+          ? sizes
+          : [{ size: fallbackSize, quantity: fallbackQty }]
+        : selectedSizes.length > 0
+          ? selectedSizes.map((size) => ({ size, quantity: 1 }))
+          : [{ size: fallbackSize, quantity: 1 }];
+
+    return rows.map((row) => ({
       ...product,
       name: product.name?.trim() || entry.form.name.trim() || t('ai.untitledProduct'),
-      size: entry.form.size.trim() || product.size || '',
+      size: row.size,
       cost_price: product.cost_price ?? parseMoney(entry.form.cost) ?? 0,
       price: product.price ?? parseMoney(entry.form.mrp) ?? 0,
       barcode: product.barcode?.trim() || entry.form.barcode.trim() || product.id,
-      qty: labelCopies(entry.form, entry.status),
-    };
+      qty: entry.status === 'stock_added' ? row.quantity : 1,
+    }));
   };
 
   const printLabels = async (entries: ConfirmedDraft[]) => {
     if (entries.length === 0 || printingId !== null) return;
     setPrintingId(entries.length === 1 ? entries[0].form.id : 'all');
     try {
-      const labels = (await Promise.all(entries.map(buildLabel))).filter(
-        (label): label is LabelProduct => label !== null
-      );
+      const labelGroups = await Promise.all(entries.map(buildLabels));
+      const labels = labelGroups.flat();
       if (labels.length === 0) {
         Alert.alert(t('ai.printFailed'), t('ai.error.not_found'));
         return;
@@ -337,6 +399,15 @@ export default function AiImportReviewScreen() {
 
     const draft = formToDraft(form);
     const linkedId = resolveLinkedId(form);
+    const stockEntries = sizeRowsToDraftSizes(form.sizes);
+    const sizeIssue =
+      linkedId || form.receiveStock
+        ? sizeRowsIssue(form.sizes, true)
+        : null;
+    if (sizeIssue) {
+      showValidation([sizeIssue]);
+      return;
+    }
     const issues = linkedId
       ? validateDraftForStock(draft)
       : validateDraftForCreate(draft, form.receiveStock);
@@ -351,6 +422,7 @@ export default function AiImportReviewScreen() {
         typeId: form.typeId || null,
         receiveStock: linkedId ? true : form.receiveStock,
         existingProductId: linkedId,
+        stockEntries,
       });
       setForms((previous) =>
         previous.map((item, itemIndex) =>
@@ -427,6 +499,15 @@ export default function AiImportReviewScreen() {
         continue;
       }
 
+      const stockEntries = sizeRowsToDraftSizes(form.sizes);
+      const sizeIssue =
+        linkedId || form.receiveStock
+          ? sizeRowsIssue(form.sizes, true)
+          : null;
+      if (sizeIssue) {
+        failed += 1;
+        continue;
+      }
       const issues = linkedId
         ? validateDraftForStock(draft)
         : validateDraftForCreate(draft, form.receiveStock);
@@ -440,6 +521,7 @@ export default function AiImportReviewScreen() {
           typeId: form.typeId || null,
           receiveStock: linkedId ? true : form.receiveStock,
           existingProductId: linkedId,
+          stockEntries,
         });
         updates[form.id] = {
           status: result.status,
@@ -842,27 +924,13 @@ export default function AiImportReviewScreen() {
                       />
                     </View>
 
-                    <View style={styles.row}>
-                      <AppInput
-                        label={t('ai.quantity')}
-                        value={form.quantity}
-                        onChangeText={(value) => updateField(index, { quantity: value })}
-                        onBlur={() => persistForm(form)}
-                        keyboardType="numeric"
-                        placeholder={t('ai.quantityPlaceholder')}
-                        style={{ flex: 1 }}
-                        editable={isPending}
-                      />
-                      <AppInput
-                        label={t('ai.size')}
-                        value={form.size}
-                        onChangeText={(value) => updateField(index, { size: value })}
-                        onBlur={() => persistForm(form)}
-                        placeholder={t('ai.sizePlaceholder')}
-                        style={{ flex: 1 }}
-                        editable={isPending}
-                      />
-                    </View>
+                    <SizeQuantityEditor
+                      sizes={form.sizes}
+                      onChange={(sizes) => updateSizes(index, sizes)}
+                      disabled={!isPending}
+                      title={t('ai.sizes')}
+                      hint={t('ai.sizesHint')}
+                    />
 
                     <AppInput
                       label={t('ai.barcode')}

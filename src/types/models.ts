@@ -164,6 +164,12 @@ export interface AiExtractionResult {
 
 export type AiDraftStatus = 'pending' | 'created' | 'stock_added' | 'discarded';
 
+/** A size and quantity received for an AI draft. */
+export interface AiDraftSize {
+  size: string;
+  quantity: number;
+}
+
 /** A locally persisted, editable product draft. */
 export interface AiProductDraft {
   id: string;
@@ -176,6 +182,8 @@ export interface AiProductDraft {
   mrp: number | null;
   quantity: number | null;
   size: string | null;
+  /** Size-wise stock quantities entered by the user. */
+  sizes?: AiDraftSize[];
   colour: string | null;
   barcode: string | null;
   supplier_name: string | null;
